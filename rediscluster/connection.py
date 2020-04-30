@@ -17,9 +17,10 @@ from .exceptions import (
 )
 
 # 3rd party imports
-from redis._compat import nativestr
+from redis._compat import (nativestr, iteritems,
+                           urlparse, parse_qs, unquote)
 from redis.client import dict_merge
-from redis.connection import ConnectionPool, Connection, DefaultParser, SSLConnection
+from redis.connection import ConnectionPool, Connection, DefaultParser, SSLConnection, URL_QUERY_ARGUMENT_PARSERS
 from redis.exceptions import ConnectionError
 
 
@@ -72,6 +73,7 @@ class SSLClusterConnection(SSLConnection):
     def __init__(self, **kwargs):
         self.readonly = kwargs.pop('readonly', False)
         kwargs['parser_class'] = ClusterParser
+        kwargs.pop('ssl', None)
         super(SSLClusterConnection, self).__init__(**kwargs)
 
     def on_connect(self):
@@ -161,6 +163,116 @@ class ClusterConnectionPool(ConnectionPool):
             type(self).__name__,
             ", ".join([self.connection_class.description_format % dict(node, **self.connection_kwargs) for node in nodes])
         )
+
+    @classmethod
+    def from_url(cls, url, db=None, decode_components=False, **kwargs):
+        """
+        Return a connection pool configured from the given URL.
+
+        For example::
+
+            redis://[:password]@localhost:6379/0
+            rediss://[:password]@localhost:6379/0
+            unix://[:password]@/path/to/socket.sock?db=0
+
+        Three URL schemes are supported:
+
+        - ```redis://``
+          <https://www.iana.org/assignments/uri-schemes/prov/redis>`_ creates a
+          normal TCP socket connection
+        - ```rediss://``
+          <https://www.iana.org/assignments/uri-schemes/prov/rediss>`_ creates
+          a SSL wrapped TCP socket connection
+        - ``unix://`` creates a Unix Domain Socket connection
+
+        There are several ways to specify a database number. The parse function
+        will return the first specified option:
+            1. A ``db`` querystring option, e.g. redis://localhost?db=0
+            2. If using the redis:// scheme, the path argument of the url, e.g.
+               redis://localhost/0
+            3. The ``db`` argument to this function.
+
+        If none of these options are specified, db=0 is used.
+
+        The ``decode_components`` argument allows this function to work with
+        percent-encoded URLs. If this argument is set to ``True`` all ``%xx``
+        escapes will be replaced by their single-character equivalents after
+        the URL has been parsed. This only applies to the ``hostname``,
+        ``path``, and ``password`` components.
+
+        Any additional querystring arguments and keyword arguments will be
+        passed along to the ConnectionPool class's initializer. The querystring
+        arguments ``socket_connect_timeout`` and ``socket_timeout`` if supplied
+        are parsed as float values. The arguments ``socket_keepalive`` and
+        ``retry_on_timeout`` are parsed to boolean values that accept
+        True/False, Yes/No values to indicate state. Invalid types cause a
+        ``UserWarning`` to be raised. In the case of conflicting arguments,
+        querystring arguments always win.
+
+        """
+        url = urlparse(url)
+        url_options = {}
+
+        for name, value in iteritems(parse_qs(url.query)):
+            if value and len(value) > 0:
+                parser = URL_QUERY_ARGUMENT_PARSERS.get(name)
+                if parser:
+                    try:
+                        url_options[name] = parser(value[0])
+                    except (TypeError, ValueError):
+                        raise
+                else:
+                    url_options[name] = value[0]
+
+        if decode_components:
+            password = unquote(url.password) if url.password else None
+            path = unquote(url.path) if url.path else None
+            hostname = unquote(url.hostname) if url.hostname else None
+        else:
+            password = url.password
+            path = url.path
+            hostname = url.hostname
+
+        # We only support redis:// and unix:// schemes.
+        if url.scheme == 'unix':
+            url_options.update({
+                'password': password,
+                'path': path,
+                'connection_class': UnixDomainSocketConnection,
+            })
+
+        else:
+            url_options.update({
+                'host': hostname,
+                'port': int(url.port or 6379),
+                'password': password,
+            })
+
+            # If there's a path argument, use it as the db argument if a
+            # querystring value wasn't specified
+            if 'db' not in url_options and path:
+                try:
+                    url_options['db'] = int(path.replace('/', ''))
+                except (AttributeError, ValueError):
+                    pass
+
+            if url.scheme == 'rediss':
+                url_options['connection_class'] = SSLClusterConnection
+
+        # last shot at the db value
+        url_options['db'] = int(url_options.get('db', db or 0))
+
+        # update the arguments from the URL values
+        kwargs.update(url_options)
+
+        # backwards compatability
+        if 'charset' in kwargs:
+            kwargs['encoding'] = kwargs.pop('charset')
+        if 'errors' in kwargs:
+            kwargs['encoding_errors'] = kwargs.pop('errors')
+
+        return cls(**kwargs)
+
 
     def reset(self):
         """

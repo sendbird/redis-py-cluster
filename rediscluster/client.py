@@ -183,7 +183,7 @@ class RedisCluster(Redis):
         if "db" in kwargs:
             raise RedisClusterException("Argument 'db' is not possible to use in cluster mode")
 
-        if kwargs.pop('ssl', False):  # Needs to be removed to avoid exception in redis Connection init
+        if kwargs.get('ssl', False):  # Needs to be removed to avoid exception in redis Connection init
             connection_class = SSLClusterConnection
 
         if "connection_pool" in kwargs:
@@ -251,7 +251,13 @@ class RedisCluster(Redis):
         else:
             connection_pool_cls = ClusterConnectionPool
 
-        connection_pool = connection_pool_cls.from_url(url, db=db, skip_full_coverage_check=skip_full_coverage_check, **kwargs)
+        if url.startswith('rediss://'):
+            connection_pool = connection_pool_cls.from_url(url, db=db,
+                                                           skip_full_coverage_check=skip_full_coverage_check,
+                                                           connection_class=SSLClusterConnection, **kwargs)
+        else:
+            connection_pool = connection_pool_cls.from_url(url, db=db, skip_full_coverage_check=skip_full_coverage_check, **kwargs)
+
         return cls(connection_pool=connection_pool, skip_full_coverage_check=skip_full_coverage_check)
 
     def __repr__(self):
